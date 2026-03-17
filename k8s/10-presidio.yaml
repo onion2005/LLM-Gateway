@@ -1,0 +1,146 @@
+# §7.1: Microsoft Presidio — self-hosted PII detection and anonymisation
+#
+# Two components:
+#   presidio-analyzer   (port 5002) — detects PII entities in text
+#   presidio-anonymizer (port 5001) — replaces detected PII with placeholders (e.g. [EMAIL])
+#
+# LiteLLM calls these at pre_call (mask prompt before sending to Bedrock) and
+# post_call (mask PII in model response before returning to caller).
+#
+# NOTE: presidio-analyzer downloads the en_core_web_lg spaCy model on first start.
+# Allow 2-3 minutes for the first pod to become ready.
+#
+# Apply: kubectl apply -f 10-presidio.yaml
+---
+# §7.1: Presidio Analyzer — detects PII entity types in text
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: presidio-analyzer
+  namespace: llmgw
+  labels:
+    app: presidio-analyzer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: presidio-analyzer
+  template:
+    metadata:
+      labels:
+        app: presidio-analyzer
+    spec:
+      # Presidio images run Gunicorn as root — not built for non-root operation.
+      # Safe to allow here: internal-only service, not exposed outside the cluster.
+      containers:
+        - name: presidio-analyzer
+          image: mcr.microsoft.com/presidio-analyzer:latest
+          ports:
+            - containerPort: 3000    # analyzer listens on 3000, not 5002
+              name: http
+          env:
+            # §7.1: PII entity types to detect (all standard types)
+            - name: PRESIDIO_SUPPORTED_LANGUAGES
+              value: "en"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1500Mi   # NLP model (en_core_web_lg) needs ~1GB RAM
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 60    # NLP model load takes ~2min on first start
+            periodSeconds: 10
+            failureThreshold: 12       # 2 extra minutes of tolerance
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: presidio-analyzer
+  namespace: llmgw
+spec:
+  selector:
+    app: presidio-analyzer
+  ports:
+    - port: 5002      # LiteLLM calls port 5002; forward to container's 3000
+      targetPort: 3000
+      name: http
+  type: ClusterIP
+---
+# §7.1: Presidio Anonymizer — replaces detected PII with masked placeholders
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: presidio-anonymizer
+  namespace: llmgw
+  labels:
+    app: presidio-anonymizer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: presidio-anonymizer
+  template:
+    metadata:
+      labels:
+        app: presidio-anonymizer
+    spec:
+      containers:
+        - name: presidio-anonymizer
+          image: mcr.microsoft.com/presidio-anonymizer:latest
+          ports:
+            - containerPort: 3000    # anonymizer listens on 3000, not 5001
+              name: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: presidio-anonymizer
+  namespace: llmgw
+spec:
+  selector:
+    app: presidio-anonymizer
+  ports:
+    - port: 5001      # LiteLLM calls port 5001; forward to container's 3000
+      targetPort: 3000
+      name: http
+  type: ClusterIP

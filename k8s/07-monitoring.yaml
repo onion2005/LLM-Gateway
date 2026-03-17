@@ -1,0 +1,341 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 5Gi
+
+# ─── Prometheus ───────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    scrape_configs:
+      - job_name: litellm
+        metrics_path: /metrics/
+        static_configs:
+          - targets: ['litellm.llmgw.svc.cluster.local:4000']
+        metric_relabel_configs:
+          # Keep only litellm_ metrics and basic process metrics
+          - source_labels: [__name__]
+            regex: '(litellm_.*|process_.*|python_.*)'
+            action: keep
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.51.0
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus"
+            - "--storage.tsdb.retention.time=7d"
+            - "--web.enable-lifecycle"
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+              readOnly: true
+            - name: data
+              mountPath: /prometheus
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: prometheus-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - port: 9090
+      targetPort: 9090
+  type: ClusterIP
+
+# ─── Grafana ──────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasource
+  namespace: monitoring
+data:
+  datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prometheus.monitoring.svc.cluster.local:9090
+        isDefault: true
+        editable: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: monitoring
+data:
+  provider.yaml: |
+    apiVersion: 1
+    providers:
+      - name: default
+        type: file
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-litellm
+  namespace: monitoring
+data:
+  litellm.json: |
+    {
+      "title": "LiteLLM Gateway",
+      "uid": "litellm-gw",
+      "schemaVersion": 36,
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "panels": [
+        {
+          "id": 1, "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+          "title": "Total Requests", "type": "stat",
+          "targets": [{ "expr": "sum(litellm_proxy_total_requests_metric_total)", "legendFormat": "requests" }],
+          "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } }
+        },
+        {
+          "id": 2, "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+          "title": "Total Input Tokens", "type": "stat",
+          "targets": [{ "expr": "sum(litellm_input_tokens_metric_total)", "legendFormat": "tokens" }],
+          "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } }
+        },
+        {
+          "id": 3, "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+          "title": "Total Output Tokens", "type": "stat",
+          "targets": [{ "expr": "sum(litellm_output_tokens_metric_total)", "legendFormat": "tokens" }],
+          "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } }
+        },
+        {
+          "id": 4, "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+          "title": "Total Spend (USD)", "type": "stat",
+          "targets": [{ "expr": "sum(litellm_spend_metric_total)", "legendFormat": "USD" }],
+          "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 } }
+        },
+        {
+          "id": 5, "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+          "title": "Error Rate", "type": "stat",
+          "targets": [{ "expr": "sum(rate(litellm_proxy_failed_requests_metric_total[5m])) / sum(rate(litellm_proxy_total_requests_metric_total[5m])) * 100", "legendFormat": "%" }],
+          "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": { "defaults": { "unit": "percent", "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 5, "color": "yellow" }, { "value": 10, "color": "red" }] } } }
+        },
+        {
+          "id": 6, "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+          "title": "In-Flight Requests", "type": "stat",
+          "targets": [{ "expr": "litellm_in_flight_requests", "legendFormat": "in-flight" }],
+          "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } }
+        },
+        {
+          "id": 10, "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+          "title": "Requests / min by Model", "type": "timeseries",
+          "targets": [{ "expr": "sum by (model) (rate(litellm_proxy_total_requests_metric_total[1m]) * 60)", "legendFormat": "{{model}}" }],
+          "fieldConfig": { "defaults": { "unit": "reqpm" } }
+        },
+        {
+          "id": 11, "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+          "title": "Failed Requests / min by Model", "type": "timeseries",
+          "targets": [{ "expr": "sum by (model) (rate(litellm_proxy_failed_requests_metric_total[1m]) * 60)", "legendFormat": "{{model}}" }],
+          "fieldConfig": { "defaults": { "unit": "reqpm", "color": { "fixedColor": "red", "mode": "fixed" } } }
+        },
+        {
+          "id": 20, "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+          "title": "Input Tokens / min by Model", "type": "timeseries",
+          "targets": [{ "expr": "sum by (model) (rate(litellm_input_tokens_metric_total[1m]) * 60)", "legendFormat": "{{model}}" }],
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "id": 21, "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+          "title": "Output Tokens / min by Model", "type": "timeseries",
+          "targets": [{ "expr": "sum by (model) (rate(litellm_output_tokens_metric_total[1m]) * 60)", "legendFormat": "{{model}}" }],
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "id": 30, "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
+          "title": "Spend / hour by Model (USD)", "type": "timeseries",
+          "targets": [{ "expr": "sum by (model) (rate(litellm_spend_metric_total[1h]) * 3600)", "legendFormat": "{{model}}" }],
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 } }
+        },
+        {
+          "id": 31, "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
+          "title": "Cumulative Spend by Model (USD)", "type": "timeseries",
+          "targets": [{ "expr": "sum by (model) (litellm_spend_metric_total)", "legendFormat": "{{model}}" }],
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 } }
+        },
+        {
+          "id": 40, "gridPos": { "x": 0, "y": 28, "w": 12, "h": 8 },
+          "title": "Remaining RPM by Model", "type": "timeseries",
+          "targets": [{ "expr": "litellm_remaining_requests_metric", "legendFormat": "{{model}}" }],
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "id": 41, "gridPos": { "x": 12, "y": 28, "w": 12, "h": 8 },
+          "title": "Remaining TPM by Model", "type": "timeseries",
+          "targets": [{ "expr": "litellm_remaining_tokens_metric", "legendFormat": "{{model}}" }],
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472
+        fsGroup: 472
+      containers:
+        - name: grafana
+          image: grafana/grafana:10.4.0
+          ports:
+            - containerPort: 3000
+          env:
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-secret
+                  key: admin-password
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "false"
+            - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+              value: "/var/lib/grafana/dashboards/litellm.json"
+          volumeMounts:
+            - name: datasource
+              mountPath: /etc/grafana/provisioning/datasources
+              readOnly: true
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+              readOnly: true
+            - name: dashboard-json
+              mountPath: /var/lib/grafana/dashboards
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/grafana/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: datasource
+          configMap:
+            name: grafana-datasource
+        - name: dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+        - name: dashboard-json
+          configMap:
+            name: grafana-dashboard-litellm
+        - name: data
+          persistentVolumeClaim:
+            claimName: grafana-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  selector:
+    app: grafana
+  ports:
+    - port: 3000
+      targetPort: 3000
+  type: ClusterIP

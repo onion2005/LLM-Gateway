@@ -1,0 +1,66 @@
+# ─── nginx Ingress Controller ─────────────────────────────────────────────────
+# Deploys nginx ingress into its own namespace and provisions an AWS NLB.
+# Apply once: kubectl apply -f 08-ingress.yaml
+#
+# After applying, get the NLB hostname:
+#   kubectl -n ingress-nginx get svc ingress-nginx-controller
+# Then create a CNAME in your DNS:
+#   llmgw.example.com  →  <NLB hostname>
+#
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+
+---
+# ─── cert-manager ─────────────────────────────────────────────────────────────
+# Manages TLS certificates via Let's Encrypt.
+# Requires cert-manager CRDs — install first (done in README deploy order).
+#
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@example.com        # ← replace with your email
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx
+
+---
+# ─── LiteLLM Ingress ──────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: litellm
+  namespace: llmgw
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"   # streaming responses
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - llmgw.example.com        # ← replace with your domain
+      secretName: litellm-tls
+  rules:
+    - host: llmgw.example.com      # ← replace with your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: litellm
+                port:
+                  number: 4000

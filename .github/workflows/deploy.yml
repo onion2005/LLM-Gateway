@@ -1,0 +1,94 @@
+name: Deploy
+
+on:
+  # Manual trigger — review terraform plan before applying
+  workflow_dispatch:
+    inputs:
+      component:
+        description: "What to deploy"
+        required: true
+        default: k8s
+        type: choice
+        options:
+          - k8s
+          - terraform
+          - all
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+jobs:
+  deploy-terraform:
+    name: Terraform apply
+    runs-on: ubuntu-latest
+    if: inputs.component == 'terraform' || inputs.component == 'all'
+    environment: production   # requires manual approval in GitHub Environments
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Terraform init
+        run: terraform init
+        working-directory: terraform
+
+      - name: Terraform plan
+        run: terraform plan -out=tfplan
+        working-directory: terraform
+
+      - name: Terraform apply
+        run: terraform apply tfplan
+        working-directory: terraform
+
+  deploy-k8s:
+    name: kubectl apply
+    runs-on: ubuntu-latest
+    if: inputs.component == 'k8s' || inputs.component == 'all'
+    needs: []   # can run independently of terraform
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name charming-electro-pumpkin --region us-east-1
+
+      - name: Apply manifests
+        # Skip secrets — those are applied manually to avoid secrets in CI logs
+        run: |
+          kubectl apply -f k8s/00-namespaces.yaml
+          kubectl apply -f k8s/03-serviceaccounts.yaml
+          kubectl apply -f k8s/02-configmap-litellm.yaml
+          kubectl apply -f k8s/04-litellm.yaml
+          kubectl apply -f k8s/06-networkpolicy.yaml
+          kubectl apply -f k8s/07-monitoring.yaml
+          kubectl apply -f k8s/08-ingress.yaml
+          kubectl apply -f k8s/09-postgres.yaml
+          kubectl apply -f k8s/10-presidio.yaml
+
+      - name: Wait for rollout
+        run: |
+          kubectl -n llmgw rollout status deployment/litellm --timeout=5m
+          kubectl -n llmgw rollout status statefulset/postgres --timeout=3m
+
+      - name: Smoke test
+        run: |
+          kubectl -n llmgw port-forward svc/litellm 4000:4000 &
+          sleep 5
+          curl -sf http://localhost:4000/health \
+            -H "Authorization: Bearer ${{ secrets.LITELLM_MASTER_KEY }}" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('healthy_count',0) >= 0 else 1)"

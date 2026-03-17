@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  terraform-validate:
+    name: Terraform fmt + validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+        working-directory: terraform
+
+      # -backend=false skips S3 backend auth — sufficient for syntax + provider validation
+      - name: Validate
+        run: |
+          terraform init -backend=false
+          terraform validate
+        working-directory: terraform
+
+  k8s-validate:
+    name: K8s manifest lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Lint YAML
+        run: yamllint -d '{extends: relaxed, rules: {line-length: {max: 200}}}' k8s/
+
+      - name: kubectl dry-run (client-side)
+        uses: azure/setup-kubectl@v4
+
+      - run: |
+          # Client-side dry-run validates manifest structure without a cluster
+          kubectl apply --dry-run=client -f k8s/ 2>&1 | grep -v "^Warning:"
+
+  test:
+    name: Gateway integration tests
+    runs-on: ubuntu-latest
+    # Only run on main — requires live cluster access via OIDC
+    if: github.ref == 'refs/heads/main'
+    needs: [terraform-validate, k8s-validate]
+    permissions:
+      id-token: write   # required for OIDC token
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name charming-electro-pumpkin --region us-east-1
+
+      - name: Port-forward LiteLLM
+        run: |
+          kubectl -n llmgw port-forward svc/litellm 4000:4000 &
+          sleep 5   # wait for tunnel
+
+      - name: Install test dependencies
+        run: pip install openai requests
+
+      - name: Run validation tests
+        env:
+          GATEWAY_URL: http://localhost:4000
+          MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+        run: python tests/validate_gateway.py

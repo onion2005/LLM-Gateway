@@ -1,0 +1,188 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: llmgw
+  labels:
+    app: litellm
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      serviceAccountName: litellm-app
+
+      # Spread across nodes for HA
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: litellm
+                topologyKey: kubernetes.io/hostname
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm-non_root:main-latest
+          args:
+            - "--config"
+            - "/etc/litellm/config.yaml"
+            - "--port"
+            - "4000"
+          ports:
+            - containerPort: 4000
+              name: http
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master-key
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: HOME
+              value: "/app"
+            - name: LITELLM_MIGRATION_DIR
+              value: "/tmp/migrations"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: database-url
+            - name: npm_config_cache
+              value: "/tmp/npm-cache"
+            # Direct Anthropic API key (non-Bedrock models) — commented out,
+            # uncomment when anthropic-secret is created in 01-secrets.yaml.
+            # - name: ANTHROPIC_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: anthropic-secret
+            #       key: api-key
+            # §7.1: Presidio PII masking — analyzer detects, anonymizer masks
+            - name: PRESIDIO_ANALYZER_API_BASE
+              value: "http://presidio-analyzer.llmgw.svc.cluster.local:5002"
+            - name: PRESIDIO_ANONYMIZER_API_BASE
+              value: "http://presidio-anonymizer.llmgw.svc.cluster.local:5001"
+            # §7.2: Bedrock Guardrails — content moderation + prompt injection
+            - name: BEDROCK_GUARDRAIL_ID
+              valueFrom:
+                secretKeyRef:
+                  name: bedrock-guardrail-secret
+                  key: guardrail-id
+            - name: BEDROCK_GUARDRAIL_VERSION
+              valueFrom:
+                secretKeyRef:
+                  name: bedrock-guardrail-secret
+                  key: guardrail-version
+            # REQ §6: Slack webhook for 80% budget spend alerts
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-alerting
+                  key: slack-webhook-url
+          volumeMounts:
+            - name: config
+              mountPath: /etc/litellm
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 4000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # LiteLLM writes temp files
+            capabilities:
+              drop: ["ALL"]
+
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: llmgw
+spec:
+  selector:
+    app: litellm
+  ports:
+    - port: 4000
+      targetPort: 4000
+      name: http
+  type: ClusterIP
+---
+# PodDisruptionBudget — ensures at least 1 replica stays up during node drains
+# and rolling deploys, preventing full gateway outage during cluster maintenance.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: litellm
+  namespace: llmgw
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: litellm
+---
+# HorizontalPodAutoscaler — scales between 2 and 5 replicas based on CPU.
+# Requests are CPU-bound (waiting on Bedrock), so CPU is a reliable signal.
+# Scale-up is fast (60s), scale-down is conservative (5min) to avoid flapping.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: litellm
+  namespace: llmgw
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: litellm
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300

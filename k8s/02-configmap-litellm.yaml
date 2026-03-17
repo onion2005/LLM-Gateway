@@ -1,0 +1,149 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: llmgw
+data:
+  config.yaml: |
+    model_list:
+      # ── Sonnet 4.6 — complex tasks (summarisation, long transcripts) ──────────
+      - model_name: claude-sonnet
+        litellm_params:
+          model: bedrock/arn:aws:bedrock:us-east-1:409633134924:inference-profile/global.anthropic.claude-sonnet-4-6
+          aws_region_name: us-east-1
+          max_tokens: 8192
+          input_cost_per_token: 0.000003    # $3.00 / 1M
+          output_cost_per_token: 0.000015   # $15.00 / 1M
+        model_info:
+          # REQ §3: model-level limits — sonnet is stricter (more expensive)
+          rpm_limit: 60
+          tpm_limit: 500000
+
+      # ── Haiku 4.5 — simple tasks (Q&A, short queries) ───────────────────────
+      - model_name: claude-haiku
+        litellm_params:
+          model: bedrock/arn:aws:bedrock:us-east-1:409633134924:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0
+          aws_region_name: us-east-1
+          max_tokens: 4096
+          input_cost_per_token: 0.0000008   # $0.80 / 1M
+          output_cost_per_token: 0.000004   # $4.00 / 1M
+        model_info:
+          # REQ §3: haiku gets higher limits than sonnet (cheaper model)
+          rpm_limit: 120
+          tpm_limit: 1000000
+
+      # ── Sonnet 4.5 — direct Anthropic API (non-Bedrock) ─────────────────────
+      # Commented out: requires a separate Anthropic API key (additional cost).
+      # To enable: uncomment below, add ANTHROPIC_API_KEY to 01-secrets.yaml
+      # and 04-litellm.yaml, then re-apply and rollout restart.
+      #
+      # - model_name: claude-sonnet-direct
+      #   litellm_params:
+      #     model: anthropic/claude-sonnet-4-5-20250929
+      #     api_key: os.environ/ANTHROPIC_API_KEY
+      #     max_tokens: 8192
+      #     input_cost_per_token: 0.000003    # $3.00 / 1M
+      #     output_cost_per_token: 0.000015   # $15.00 / 1M
+      #   model_info:
+      #     rpm_limit: 60
+      #     tpm_limit: 500000
+
+      # ── Auto — cost-based routing: haiku by default, sonnet as fallback ──────
+      # REQ §4: claude-auto is only available to feature-team3 and feature-team4
+      - model_name: claude-auto
+        litellm_params:
+          model: bedrock/arn:aws:bedrock:us-east-1:409633134924:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0
+          aws_region_name: us-east-1
+          max_tokens: 4096
+          input_cost_per_token: 0.0000008
+          output_cost_per_token: 0.000004
+
+      - model_name: claude-auto
+        litellm_params:
+          model: bedrock/arn:aws:bedrock:us-east-1:409633134924:inference-profile/global.anthropic.claude-sonnet-4-6
+          aws_region_name: us-east-1
+          max_tokens: 8192
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+
+    router_settings:
+      routing_strategy: cost-based-routing
+      retry_policy:
+        RateLimitErrorRetries: 3
+        TimeoutErrorRetries: 2
+        AuthenticationErrorRetries: 0
+        BadRequestErrorRetries: 0
+
+    litellm_settings:
+      drop_params: true
+      set_verbose: false
+      request_timeout: 300
+      num_retries: 3
+      retry_after: 5
+      context_window_fallback_dict:
+        claude-sonnet: 180000
+        claude-haiku: 180000
+        claude-auto: 180000
+      disable_spend_logs: false
+      success_callback: ["prometheus"]
+      failure_callback: ["prometheus"]
+
+      # ── REQ §3: Per-user rate limits (applies within each team) ──────────────
+      # Protects against a single user consuming the entire team's quota.
+      # Platform team can override per-user when issuing a key via the UI.
+      default_user_params:
+        rpm_limit: 20      # conservative per-user ceiling
+        tpm_limit: 50000
+
+      # REQ §1-§4: Teams are managed via the LiteLLM API/UI and stored in PostgreSQL.
+      # They were created with: POST /team/new (see multi-team-requirements.md)
+      # To recreate after a DB wipe, re-run the curl commands in that doc or use the UI.
+
+    guardrails:
+      # §7.1: PII masking on input — Presidio masks PII in user prompt before sending to Bedrock
+      # Action: mask (replace with placeholder e.g. [EMAIL]) — not block, per §7 assumed constraints
+      - guardrail_name: "presidio-pii-input"
+        litellm_params:
+          guardrail: presidio
+          mode: "pre_call"               # §7.1: mask PII in input prompt
+          default_on: true               # §7.1: applies to all teams uniformly
+
+      # §7.1: PII masking on output — Presidio masks PII in model response before returning to caller
+      - guardrail_name: "presidio-pii-output"
+        litellm_params:
+          guardrail: presidio
+          mode: "post_call"              # §7.1: mask PII in model response
+          output_parse_pii: true
+          default_on: true               # §7.1: applies to all teams uniformly
+
+      # §7.2: Content moderation on input — blocks hate, violence, self-harm, adult content, prompt injection
+      - guardrail_name: "bedrock-content-input"
+        litellm_params:
+          guardrail: bedrock
+          mode: "pre_call"               # §7.2: check prompt before sending to model
+          guardrailIdentifier: os.environ/BEDROCK_GUARDRAIL_ID
+          guardrailVersion: os.environ/BEDROCK_GUARDRAIL_VERSION
+          default_on: true               # §7.2: applies to all teams uniformly
+
+      # §7.2: Content moderation on output — blocks harmful content in model responses
+      - guardrail_name: "bedrock-content-output"
+        litellm_params:
+          guardrail: bedrock
+          mode: "post_call"              # §7.2: check model response before returning to caller
+          guardrailIdentifier: os.environ/BEDROCK_GUARDRAIL_ID
+          guardrailVersion: os.environ/BEDROCK_GUARDRAIL_VERSION
+          default_on: true               # §7.2: applies to all teams uniformly
+
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+      database_url: os.environ/database-url
+
+      # REQ §2: Global gateway budget ceiling across all teams
+      # Set above the sum of team caps ($500) to allow platform team headroom.
+      max_budget: 600               # $600/month global hard ceiling
+      budget_duration: "monthly"
+
+      # REQ §6: Slack alerts when any team or the global gateway hits 80% of budget
+      alerting: ["slack"]
+      alerting_threshold: 0.8       # 80% spend triggers Slack notification
+      slack_webhook_url: os.environ/SLACK_WEBHOOK_URL

@@ -1,0 +1,26 @@
+# Local env — may contain secrets
+.envrc
+*.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+*.tfplan
+terraform.tfvars
+override.tf
+override.tf.json
+
+# macOS
+.DS_Store

@@ -1,0 +1,142 @@
+# PostgreSQL for LiteLLM spend tracking + virtual keys
+# Deployed in the llmgw namespace alongside LiteLLM.
+#
+# The database_url Secret is referenced by the LiteLLM Deployment env var.
+# Apply before rolling out LiteLLM: kubectl apply -f 09-postgres.yaml
+#
+# To generate a strong password:
+#   openssl rand -hex 24
+#
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: llmgw
+type: Opaque
+stringData:
+  password: "changeme"                             # ← replace before applying
+  database-url: "postgresql://litellm:changeme@postgres.llmgw.svc.cluster.local:5432/litellm"
+
+---
+# gp3 StorageClass using the EBS CSI driver (required on EKS 1.23+)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+provisioner: ebs.csi.eks.amazonaws.com
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+parameters:
+  type: gp3
+  encrypted: "true"
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: llmgw
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: llmgw
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: postgres:16.3-alpine
+          # Raise max_connections — default 100 is exhausted by LiteLLM's connection
+          # pool across multiple pods, causing pg_isready probes to queue and time out.
+          args: ["-c", "max_connections=200"]
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: litellm
+            - name: POSTGRES_USER
+              value: litellm
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # Fix: postgres (uid 999) needs to chmod its socket dir at startup.
+            # emptyDir is created fresh with fsGroup=999 ownership, allowing chmod.
+            - name: run
+              mountPath: /var/run/postgresql
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "litellm", "-d", "litellm"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            # tcpSocket: just checks the port is open — doesn't consume a connection
+            # slot, so it can't be starved out by LiteLLM's connection pool.
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+        - name: run
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: llmgw
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP

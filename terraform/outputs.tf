@@ -1,16 +1,3 @@
-output "bucket_name" {
-  value = aws_s3_bucket.main.id
-}
-
-output "dynamodb_table_name" {
-  value = aws_dynamodb_table.video_jobs.name
-}
-
-output "app_irsa_role_arn" {
-  description = "Annotate the summariser-app Kubernetes service account with this ARN"
-  value       = aws_iam_role.app_irsa.arn
-}
-
 output "litellm_irsa_role_arn" {
   description = "Annotate the litellm-app Kubernetes service account with this ARN"
   value       = aws_iam_role.litellm_irsa.arn

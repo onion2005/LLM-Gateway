@@ -24,3 +24,6 @@ override.tf.json
 
 # macOS
 .DS_Store
+
+# k8s
+01-secrets-1.yaml

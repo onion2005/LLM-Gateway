@@ -1,6 +1,4 @@
-# Default deny-all ingress for both namespaces, then allow only what's needed.
-
-# ─── llmgw namespace ──────────────────────────────────────────────────────────
+# Default deny-all ingress for llmgw namespace, then allow only what's needed.
 
 # Deny all ingress to llmgw by default
 apiVersion: networking.k8s.io/v1
@@ -36,7 +34,6 @@ spec:
       ports:
         - port: 4000
           protocol: TCP
-
 ---
 # Allow LiteLLM to reach Postgres on port 5432
 apiVersion: networking.k8s.io/v1
@@ -79,7 +76,6 @@ spec:
       ports:
         - port: 4000
           protocol: TCP
-
 ---
 # §7.1: Allow LiteLLM to reach Presidio Analyzer on port 5002
 apiVersion: networking.k8s.io/v1
@@ -121,35 +117,4 @@ spec:
               app: litellm
       ports:
         - port: 3000    # anonymizer container port
-          protocol: TCP
-
-# ─── summariser namespace ─────────────────────────────────────────────────────
-
----
-# Deny all ingress to summariser by default
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: default-deny-ingress
-  namespace: summariser
-spec:
-  podSelector: {}
-  policyTypes:
-    - Ingress
----
-# Allow inbound to the FastAPI app only from within the cluster (CLI port-forward / ingress controller)
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-inbound-app
-  namespace: summariser
-spec:
-  podSelector:
-    matchLabels:
-      app: summariser-app
-  policyTypes:
-    - Ingress
-  ingress:
-    - ports:
-        - port: 8000
           protocol: TCP

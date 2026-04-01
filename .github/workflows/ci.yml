@@ -38,7 +38,8 @@ jobs:
         run: pip install yamllint
 
       - name: Lint YAML
-        run: yamllint -d "{extends: relaxed, rules: {line-length: {max: 200}}}" k8s/
+        run: |
+          yamllint -d "{extends: relaxed, rules: {line-length: {max: 200}}}" k8s/
 
       - name: kubectl dry-run (client-side)
         uses: azure/setup-kubectl@v4

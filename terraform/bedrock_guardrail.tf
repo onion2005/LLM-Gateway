@@ -16,36 +16,36 @@ resource "aws_bedrock_guardrail" "llmgw" {
   # §7.2: Content moderation — hate speech, violence, self-harm, adult content
   content_policy_config {
     filters_config {
-      type             = "HATE"
-      input_strength   = "HIGH"
-      output_strength  = "HIGH"
+      type            = "HATE"
+      input_strength  = "HIGH"
+      output_strength = "HIGH"
     }
     filters_config {
-      type             = "VIOLENCE"
-      input_strength   = "HIGH"
-      output_strength  = "HIGH"
+      type            = "VIOLENCE"
+      input_strength  = "HIGH"
+      output_strength = "HIGH"
     }
     filters_config {
-      type             = "SEXUAL"
-      input_strength   = "HIGH"
-      output_strength  = "HIGH"
+      type            = "SEXUAL"
+      input_strength  = "HIGH"
+      output_strength = "HIGH"
     }
     filters_config {
-      type             = "INSULTS"
-      input_strength   = "HIGH"
-      output_strength  = "HIGH"
+      type            = "INSULTS"
+      input_strength  = "HIGH"
+      output_strength = "HIGH"
     }
     filters_config {
-      type             = "MISCONDUCT"
-      input_strength   = "HIGH"
-      output_strength  = "HIGH"
+      type            = "MISCONDUCT"
+      input_strength  = "HIGH"
+      output_strength = "HIGH"
     }
     # §7.2: Prompt injection — block attempts to override system instructions
     # output_strength must be NONE for PROMPT_ATTACK (input-only detection)
     filters_config {
-      type             = "PROMPT_ATTACK"
-      input_strength   = "HIGH"
-      output_strength  = "NONE"
+      type            = "PROMPT_ATTACK"
+      input_strength  = "HIGH"
+      output_strength = "NONE"
     }
   }
 }

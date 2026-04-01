@@ -1,17 +1,17 @@
 variable "aws_region" {
   description = "AWS region"
   type        = string
-  default     = ""
+  default     = "us-east-1"
 }
 
 variable "eks_oidc_provider_url" {
   description = "EKS OIDC provider URL without https:// prefix (e.g. oidc.eks.us-east-1.amazonaws.com/id/XXXX)"
   type        = string
-  default     = ""
+  default     = "oidc.eks.us-east-1.amazonaws.com/id/XXXX"
 }
 
 variable "eks_oidc_provider_arn" {
   description = "EKS OIDC provider ARN"
   type        = string
-  default     = ""
+  default     = "arn:aws:iam::ACCOUNT_ID:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/XXXX"
 }

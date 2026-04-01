@@ -31,7 +31,7 @@
 
 terraform {
   backend "s3" {
-    bucket         = "llmgw-tfstate-409633134924"
+    bucket         = "llmgw-tfstate-${data.aws_caller_identity.current.account_id}"
     key            = "llmgw/terraform.tfstate"
     region         = "us-east-1"
     encrypt        = true
